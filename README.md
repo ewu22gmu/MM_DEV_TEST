@@ -1,4 +1,4 @@
-# MM_DEV_TEST_P2
+# MM_DEV_TEST
 Files and code for modeling mining and manufacturing processes in an agent based model for CDS 465: Agent Based Modeling 2
 
 Includes:
