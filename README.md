@@ -7,7 +7,7 @@ Includes:
 -beta operations package
 -DEV_TEST ipynb
 
-Version: b.1
+Version: b.2
 Date: 10.18.2025
 
 Copyright (C) 2025 Eric Wu. All rights reserved.
