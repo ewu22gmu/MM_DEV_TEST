@@ -10,7 +10,7 @@ Created on Wed Feb 26 09:57:33 2025
 ### Date: 10.29.2025
 ### Version: b.1 
 """
-
+#%%
 #mydir = '/home/jkinser/Documents/courses/CDSCardinal/Version4/'
 #mydir = '/Users/jkinser/Documents/CoursesKinser/CDSCardinal/Version3/'
 mydir = '/Users/eric/Documents/CDS465/'
@@ -18,7 +18,6 @@ pysrc = mydir + 'pysrc/'
 datadir = mydir + 'data/'
 popdir = mydir + 'population/'
 
-#%%
 import numpy as np
 import pandas as pd
 import sqlite3 as sql
@@ -29,6 +28,8 @@ import names, island, population, movies, human, nomad
 
 sys.path.append('/Users/eric/Documents/CDS465/archieve/Dev_P1/') #Location of initialization.py
 import initialization as initf 
+import operations as ops
+
 import sqlaccess, firstmigration
 
 #%%
@@ -53,16 +54,33 @@ class Realm:
         self.marriageradius = False # radius is not restricted
 
         ###START CHANGES P1
-        self.folderpath: str = None #Store folderpath
-        self.loc_gen_dict: dict = None #Store model params
-        self.mm_debt_thold = -10000 #Store model params
-        self.accounting_period = 3 #Store model accounting period param
+        self.folderpath: str = None #store folderpath
+        self.loc_gen_dict: dict = None #store model params
+        self.mm_params = {
+            'dbug': True,
+            'mm_debt_thold': -50000,
+            'accounting_period': 3,
+            'cit_rate': 0.22,
+            'sales_tax_rate': 0.06,
+            'chunk_size': 64,
+            'begin_month': None
+        } #store additional params
 
     def InitializeMM(self):
         """
         Calls functions from initialization.py to populate mm_location_master and tables containing .location_coord
         """
-        self.mm_dfs = initf.initialize_mm(self, self.folderpath,self.loc_gen_dict)
+        n_to_evolve = (12 - self.month % 12)
+
+        if  n_to_evolve > 0: 
+            if self.mm_params['dbug']: print(f'need to evolve {n_to_evolve} months before initialization for parity with accounting periods. \n initializing')
+            self.Evolve(n_to_evolve, addpeep=0, dometh=0, migrate=False)
+        else:
+            if self.mm_params['dbug']: print('no need to evolve. initializing...')
+
+        self.mm_params['begin_month'] = self.month #store the beginning month
+        self.mm_dfs = initf.initialize_mm(self,self.folderpath,self.loc_gen_dict)
+        self.mm_dfs['qa_sandbox_orders'] = self.initfSimulateOrders()
         
     def initfQuickLook(self, n: int = 5):
         """Prints the head of each dataframe, given n the number of records to show"""
@@ -94,7 +112,6 @@ class Realm:
 
     def InitializePopulation( self, N=500, month=1000, dometh=0 ):
         population.InitialPopulation( self, N, month, dometh )
-        
     def AddImmigrants(self, N, dometh):
         # random people
         nomad.Immigrate( self, N, dometh )
@@ -109,10 +126,15 @@ class Realm:
         """The Realm.Evolve function that has been revamped to model MM processes"""
         for i in range( Nmonths ):
             #stuff before evolve
+            self.mm_dfs['qa_sandbox_orders'] = self.initfSimulateOrders(self.mm_dfs['qa_sandbox_orders'])
+            #ops.preopsMM(orders)
 
-            self.Evolve(self, 1, addpeep, dometh, migrate)
+            #Evolve
+            self.Evolve(1, addpeep, dometh, migrate)
 
             #stuff after evolve
+            ccpdf = self.initfCalcCostProfit(orders)
+            #ops.postopsMM(self, ccpdf)
 
     def InitialMigration( self, months, locs, pmrange, pct ):
         firstmigration.FirstMigration( self, months, locs, pmrange, pct )
@@ -131,7 +153,6 @@ class Realm:
         # storing empty DFs may cause dtype changes
         dct =  {'husband':int, 'wife':int, 'date':int, 'divorce':int, 'spdie':int}
         self.weddf = self.weddf.astype( dct )
-
     def SaveAll( self, fname ):
         conn = sql.connect( fname )
         cur = conn.cursor()
@@ -149,3 +170,4 @@ class Realm:
         conn.commit()
     
         
+# %%

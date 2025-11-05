@@ -30,7 +30,7 @@ def check_solvency(realmc) -> bool:
     # if any balance is less than the debt threshold, then this function will return False, 
     #   because the number of Trues from the series will be less than the number of locations,
     #   which means a location must have had a lower balance than that of mm_debt_thold
-    return False if sum(realmc.mm_dfs['mm_location_master']['balance'] > realmc.mm_params['mm_debt_thold']) < len(realmc.mm_dfs['mm_location_master']) else False
+    return True if sum(realmc.mm_dfs['mm_location_master']['balance'] > realmc.mm_params['mm_debt_thold']) < len(realmc.mm_dfs['mm_location_master']) else True
 
 def recieve_orders(realmc, ordersdf: pd.DataFrame):
     """
@@ -97,7 +97,10 @@ def mm_tax(realmc, ccpdf: pd.DataFrame):
         This function checks if realmc.month if the end of an accounting period;
             if realmc.month % 3 == 0, then return true, else false
         """
-        return True if realmc.month % realmc.mm_params['accounting_period'] == 0 else False ###NOTE: FIX THIS THIS LOGIC DOESN'T WORK
+
+        if realmc.mm_params['begin_month']+2 == realmc.month:
+            realmc.mm_params['begin_month'] = realmc.month+1 #Store begining of next acct quarter
+            return True
         
     def pay_tax(realmc, ccpdf: pd.DataFrame):
         """
@@ -105,7 +108,7 @@ def mm_tax(realmc, ccpdf: pd.DataFrame):
         This function calculates the sales tax and corperate income tax collected during the accounting period (realmc.accounting_period);
             The funds are to be taken from balance to pay for CIT.
         """
-
+        #get begin and end month of acct period to filter for sales
         end_month = realmc.month
         begin_month = end_month - realmc.mm_params['accounting_period'] + 1
         
@@ -114,15 +117,28 @@ def mm_tax(realmc, ccpdf: pd.DataFrame):
         ccpdf_period = ccpdf.loc[q1&q2] 
 
         #sales tax
-        temp_salestax = pd.merge(realmc.mm_dfs['mm_product_master'][['product_id', 'location_coord']],ccpdf, how='right', on='product_id')
+        temp_salestax = pd.merge(realmc.mm_dfs['mm_product_master'][['product_id', 'location_coord']],ccpdf_period, how='right', on='product_id')
         salestax = temp_salestax.groupby('location_coord')['sales_tax'].sum().reset_index()   
 
         #CIT  
         q1_1 = realmc.mm_dfs['mm_books']['period_s'] == max(realmc.mm_dfs['mm_books']['period_s']) #get latest bank record
         incm = realmc.mm_dfs['mm_books'].loc[q1_1]['period_income']
-        cit = 0 if incm < 1 else incm * realmc.mm_params['cit_rate']
+        cit = np.maximum(0, incm * realmc.mm_params['cit_rate'])
 
-        #subtract calculated tax
+        #subtract calculated cit tax
+        #subtract from current balance
+        realmc.mm_dfs['mm_location_master']['balance'] -= cit
+        #subtract from period income
+        realmc.mm_dfs['mm_books'].loc[q1_1, 'period_income'] -= cit
+
+        #subtract sales tax from balances (only use if sales tax is collected and NOT bucketed into mm_books and not added to balance)
+        """q1 = realmc.mm_dfs['mm_location_master']['location_coord'].isin(salestax['location_coord']) #WRONG
+
+        merged_df = pd.merge(realmc.mm_dfs['mm_location_master'], salestax, how='left', on='location_coord')
+        realmc.mm_dfs['mm_location_master'].loc[q1,'balance'] = merged_df['balance'] - merged_df['sales_tax'].fillna(0)"""
+
+        #pay out CIT and salestax
+        #return(cit, salestax)
 
     if check_tax(realmc):
         pay_tax(realmc, ccpdf)
@@ -150,9 +166,7 @@ def mm_hr(realmc, chunk_size: int = 64):
         d = np.linalg.norm(vh - evh, axis=1)
         q2 = d < radius #must be near location they work at d<46
 
-        employee_replace = employees.loc[~q1|~q2]
-
-        return employee_replace
+        return employees.loc[~q1|~q2]
 
     def hire_employees(realmc, replace: pd.DataFrame, radius: float):
         """
@@ -172,21 +186,26 @@ def mm_hr(realmc, chunk_size: int = 64):
             'and job not in [0.0,1.0]' \
             f'and pid not in {employee_pid}'
         )[cols]
-
+        
+        #cross join to assess possibilities
         temp_df = potential_employee.assign(key=1).merge(replace.assign(key=1), on='key').drop('key', axis=1)
 
+        #calculate distances
         temp_df['distance'] = np.linalg.norm(np.array(temp_df['location_coord'].tolist()) - temp_df[['locv', 'loch']].values, axis=1)
-
+        
+        #get eligable bachlors
         eligible_df = temp_df[temp_df['distance'] < radius].copy()
         eligible_df['rank'] = eligible_df.groupby('location_coord')['distance'].rank(method='first')
 
+        #get most eligable worker
         final_assignment_df = eligible_df[
             eligible_df['rank'] == 1
         ].sort_values(['location_coord', 'rank'])
 
-        pid_map = final_assignment_df.set_index('pid_y')['pid_x']
-        new_pids = realmc.mm_dfs['mm_employee_master']['pid'].map(pid_map)
-        realmc.mm_dfs['mm_employee_master']['pid'] = new_pids.fillna(realmc.mm_dfs['mm_employee_master']['pid']).astype(int)
+        #hire and assign new employee
+        pid_map = final_assignment_df.set_index('pid_y')['pid_x'] #mappping for old worker : new worker
+        new_pids = realmc.mm_dfs['mm_employee_master']['pid'].map(pid_map) #add the new worker's pids into mm_employee_master
+        realmc.mm_dfs['mm_employee_master']['pid'] = new_pids.fillna(realmc.mm_dfs['mm_employee_master']['pid']).astype(int) #save changes to df
 
         #adjust new employee's job 
         q1 = realmc.persondf['pid'].isin(final_assignment_df['pid_x'])
@@ -201,7 +220,7 @@ def mm_hr(realmc, chunk_size: int = 64):
         This function pays the employees a wage of 40,000 / 12 * (1 + np.random.rand(len(realmc.mm_dfs['mm_employee_master']['pids']))/10) 
         """
         temp_employees = realmc.mm_dfs['mm_employee_master'].copy()
-        pay = (1 + np.random.rand(len(temp_employees))/10) * 40000/12
+        pay = (1 + np.random.rand(len(temp_employees))/10) * 40000/12 # add some randomness to the data
         temp_employees['pay'] = pay #store amount paid
 
         #pay employees
@@ -240,3 +259,8 @@ def postopsMM(realmc, ccpdf: pd.DataFrame):
         mm_hr(realmc)
         if check_solvency(realmc):
             mm_tax(realmc, ccpdf)
+
+#test
+if __name__ == '__main__':
+    #testing
+    print('hello Worlb!')
