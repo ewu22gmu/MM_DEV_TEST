@@ -8,7 +8,7 @@ Created on Wed Feb 26 09:57:33 2025
 ### Edited version for CDS465 Group 3 Project: Modeling Mining and Manufacturing Processes
 ### Editor: Eric Wu
 ### Date: 10.29.2025
-### Version: b.1 
+### Version: b.3
 """
 #%%
 #mydir = '/home/jkinser/Documents/courses/CDSCardinal/Version4/'
@@ -21,6 +21,7 @@ popdir = mydir + 'population/'
 import numpy as np
 import pandas as pd
 import sqlite3 as sql
+import time
 import sys
 sys.path.append( pysrc )
 #
@@ -63,17 +64,20 @@ class Realm:
             'cit_rate': 0.22,
             'sales_tax_rate': 0.06,
             'chunk_size': 64,
-            'begin_month': None
+            'begin_month': None,
+            'n_orders': 150,
+            'xbar_order_size': 500,
+            'employee_pay': 50000
         } #store additional params
 
     def InitializeMM(self):
         """
         Calls functions from initialization.py to populate mm_location_master and tables containing .location_coord
         """
-        n_to_evolve = (12 - self.month % 12)
+        n_to_evolve =  12 - self.month % 12 if self.month % 12 else 0
 
         if  n_to_evolve > 0: 
-            if self.mm_params['dbug']: print(f'need to evolve {n_to_evolve} months before initialization for parity with accounting periods. \n initializing')
+            if self.mm_params['dbug']: print(f'Population started at {self.month}. \nNeed to evolve {n_to_evolve} months before initialization for parity with accounting periods. \ninitializing...')
             self.Evolve(n_to_evolve, addpeep=0, dometh=0, migrate=False)
         else:
             if self.mm_params['dbug']: print('no need to evolve. initializing...')
@@ -96,7 +100,7 @@ class Realm:
         opts:
             ordersdf (pd.DataFrame): the qa_sandbox_orders dataframe
         """
-        return initf.simulate_orders(self, self.folderpath, ordersdf)
+        return initf.simulate_orders(self, self.folderpath, ordersdf, 666, self.mm_params['n_orders'], self.mm_params['xbar_order_size'])
     
     def initfCalcCostProfit(self, ordersdf: pd.DataFrame = None) -> pd.DataFrame:
         """This function calculates the COGS and profit generated per order.
@@ -124,17 +128,35 @@ class Realm:
 
     def EvolveMM(self, Nmonths, addpeep, dometh, migrate=False):
         """The Realm.Evolve function that has been revamped to model MM processes"""
+        testingtime, evotime = float(), float()
         for i in range( Nmonths ):
             #stuff before evolve
+            preop_b = time.perf_counter()
             self.mm_dfs['qa_sandbox_orders'] = self.initfSimulateOrders(self.mm_dfs['qa_sandbox_orders'])
-            #ops.preopsMM(orders)
+            ops.preopsMM(self, self.mm_dfs['qa_sandbox_orders'])
+            preop_e = time.perf_counter()
+
+            #if self.mm_params['dbug']: print(f'Time to run preops at month {self.month} is {(preop_e-preop_b):.4f} seconds')
 
             #Evolve
+            ev_b = time.perf_counter()
             self.Evolve(1, addpeep, dometh, migrate)
+            ev_e = time.perf_counter()
+
+            #if self.mm_params['dbug']: print(f'Time to run original evolve is {(ev_e-ev_b):.4f} seconds')
 
             #stuff after evolve
-            ccpdf = self.initfCalcCostProfit(orders)
-            #ops.postopsMM(self, ccpdf)
+            postop_b = time.perf_counter()
+            ccpdf = self.initfCalcCostProfit(self.mm_dfs['mm_order_master'])
+            ops.postopsMM(self, ccpdf)
+            postop_e = time.perf_counter()
+
+            #if self.mm_params['dbug']: print(f'Time to run original postops is {(postop_e-postop_b):.4f} seconds. \nTotal time was {(postop_e-preop_b):.4f} seconds.')
+
+            testingtime += ((preop_e-preop_b) + (postop_e-postop_b))
+            evotime += (ev_e-ev_b)
+        if self.mm_params['dbug']: print(f'Total added time due to operations was {testingtime} seconds. \nTotal time due to Evolve was {evotime} seconds.')
+
 
     def InitialMigration( self, months, locs, pmrange, pct ):
         firstmigration.FirstMigration( self, months, locs, pmrange, pct )

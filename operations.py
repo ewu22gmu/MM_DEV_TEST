@@ -30,7 +30,7 @@ def check_solvency(realmc) -> bool:
     # if any balance is less than the debt threshold, then this function will return False, 
     #   because the number of Trues from the series will be less than the number of locations,
     #   which means a location must have had a lower balance than that of mm_debt_thold
-    return True if sum(realmc.mm_dfs['mm_location_master']['balance'] > realmc.mm_params['mm_debt_thold']) < len(realmc.mm_dfs['mm_location_master']) else True
+    return (realmc.mm_dfs['mm_location_master']['balance'] < realmc.mm_params['mm_debt_thold']).sum() < len(realmc.mm_dfs['mm_location_master'])
 
 def recieve_orders(realmc, ordersdf: pd.DataFrame):
     """
@@ -41,14 +41,27 @@ def recieve_orders(realmc, ordersdf: pd.DataFrame):
         ordersdf (pd.DataFrame): the DataFrame of orders from the stores; should follow the data standards of mm_order_master
     """
 
-    realmc.mm_dfs['mm_order_master'] = pd.concat([realmc.mm_dfs['mm_order_master'], ordersdf],ignore_index=True).drop_duplicates()
+    #collect new orders
+    realmc.mm_dfs['mm_order_master'] = pd.concat([realmc.mm_dfs['mm_order_master'], 
+                                                  ordersdf.loc[ordersdf['order_date'] == realmc.month]],
+                                                  ignore_index=True).drop_duplicates()
 
 def check_order_parity(realmc, ordersdf: pd.DataFrame):
     """
     This function checks that all of the orders recieved this month where added to mm_order_master.
         If orders are missing, add them into mm_order_master
     """
-    pass
+
+    #query out orders of this month
+    q1 = ordersdf['order_date'] == realmc.month
+    q2 = ordersdf['order_date'] > 0
+    orderids = ordersdf.loc[q1&q2, 'order_id']
+
+    #check those oreder ids are in mm order master
+    if realmc.mm_dfs['mm_order_master']['order_id'].isin(orderids).sum() != len(orderids):
+        #add missing orders
+        print("there are missing orders")  
+        print(f'Missing orders: {realmc.mm_dfs['mm_order_master'].loc[~realmc.mm_dfs['mm_order_master'].isin(orderids)]}')
 
 def preopsMM(realmc, ordersdf: pd.DataFrame):
     """
@@ -57,12 +70,11 @@ def preopsMM(realmc, ordersdf: pd.DataFrame):
     if check_solvency(realmc):
         recieve_orders(realmc, ordersdf)
         check_order_parity(realmc, ordersdf)
-    else:
-        print(f'This location is insolvent {realmc.mm_dfs['mm_location_master'].iloc[np.argwhere(check_solvency(realmc))]['location_coord']} at month {realmc.month}') ###NOTE: Check here; may not work.
-        yield
+    #else:
+        #print(f'This location is insolvent {realmc.mm_dfs['mm_location_master'].iloc[np.argwhere(check_solvency(realmc))]['location_coord']} at month {realmc.month}') ###NOTE: Check here; may not work.
     
 #Post Evolve Functions
-def mm_operations(realmc, ccpdf):
+def mm_operations(realmc, ccpdf: pd.DataFrame) -> pd.DataFrame:
     """
     This function should run the production process workflow.
         -Calculate which products were ordered, manufactured, and fufiled:
@@ -71,18 +83,158 @@ def mm_operations(realmc, ccpdf):
                 2: 'order_in_production(2m)', 3: 'order_in_production(3m)', 4: 'order_in_production(4m)'}
             -any order that is [0,4] is assumed accepted.
     """
-    def manufacture(realmc, ccpdf):
+    def manufacture(realmc, ccpdf: pd.DataFrame) -> pd.DataFrame:
         """
-        Manf orders; changes statuses. Passes orderes where costs and profits are recognized into update_books
+        Manf orders; changes statuses. Passes orders where costs and profits are recognized into update_books
         """
-        pass
-    def update_books(realmc, fufiled_orders):
+
+        #filter out order_ids of completed orders and rejected orders:
+        #collect new and incomplete orders
+        manf_ids = ccpdf.loc[(ccpdf['order_date'] == realmc.month) | (ccpdf['order_status'] > 0)]['order_id'] 
+
+        #collect the order_id
+        q1 = realmc.mm_dfs['mm_order_master']['order_id'].isin(manf_ids) 
+        realmc.mm_dfs['mm_order_master'].loc[q1,'order_status'] -= 1 #progress through manufacturing
+
+        q2 = realmc.mm_dfs['mm_order_master']['order_status'] == 0
+        manf_orders = realmc.mm_dfs['mm_order_master'].loc[q1&q2]
+
+        #return completed orders and pass them out
+        return ccpdf.loc[ccpdf['order_id'].isin(manf_orders['order_id'])]
+
+    def update_books(realmc, fufiled_orders: pd.DataFrame):
         """
         Recognizes costs and profits of orders given the orders that have been fufiled; 
             updates mm_location_master.balances and mm_books as appropriate;
             Starts a new entry in mm_books when realmc.month = 1 + 3*i.
         """
-        pass
+        pnl = fufiled_orders.groupby(['product_id']).agg(
+                    cost=('cost', 'sum'),
+                    tax=('sales_tax', 'sum'),
+                    profit=('profit', 'sum')
+                ).reset_index()
+
+        pnl_prod = pd.merge(pnl,
+                    realmc.mm_dfs['mm_product_master'],
+                    how='inner',
+                    on='product_id'
+                )
+
+        pnl_location = pd.merge(pnl_prod,
+                    realmc.mm_dfs['mm_location_master'],
+                    how='left',
+                    on='location_coord'
+                )
+
+        #first filter out latest book entry
+        q1 = realmc.mm_dfs['mm_books']['period_s'] == max(realmc.mm_dfs['mm_books']['period_s']) #get latest book
+        latest_book = realmc.mm_dfs['mm_books'].loc[q1]
+
+
+        pnl_books = pd.merge(pnl_prod,
+                    latest_book,
+                    how='left', 
+                    on='location_coord'
+                )
+        
+        
+        #update mm_location.balance
+        loc_profits = pnl_location.groupby('location_coord').agg(
+                profit=('profit','sum')
+            ).reset_index()
+
+        loc_profits_indexed = loc_profits.set_index('location_coord')['profit'] #set_index to allign indexes for adding columns
+
+        aligned_profits = realmc.mm_dfs['mm_location_master'].join(
+                loc_profits_indexed,
+                on='location_coord',
+                how='left'
+            ).fillna(0.0)['profit'] #join dfs for adding profits
+
+        realmc.mm_dfs['mm_location_master'].loc[:, 'balance'] = (
+                realmc.mm_dfs['mm_location_master']['balance'].fillna(0.0).add(aligned_profits)
+            ) #add profits to mm_location_master
+        
+        #update books
+        mm_books = realmc.mm_dfs['mm_books'] #temp storage 
+        latest_period = mm_books['period_s'].max() #store latest starting period
+
+        loc_books = pnl_books.groupby('location_coord').agg(
+                profit=('profit','sum'),
+                salestax=('tax','sum')
+            ).reset_index() #get profit and sales tax totals
+
+        temp_df = mm_books[mm_books['period_s'] == latest_period].copy() #create temp view to update latest entries
+
+        temp_df = pd.merge(
+                left=temp_df,
+                right=loc_books,
+                on='location_coord',
+                how='left'
+            )
+
+        q1 = (mm_books['period_s'] == latest_period) #temp query to update latest acct period
+
+        mm_books.loc[q1, 'period_income'] = (
+                mm_books.loc[q1, 'period_income'].fillna(0.0).values + temp_df['profit'].fillna(0.0).values
+            ) #update income
+
+        mm_books.loc[q1, 'sales_tax'] = (
+                mm_books.loc[q1, 'sales_tax'].fillna(0.0) + temp_df['salestax'].fillna(0.0).values
+            ) #update sales tax collected figure
+
+        realmc.mm_dfs['mm_books'] = mm_books #save changes
+
+        #Pay resource locations
+        ### pass thorugh monies to raw resource locations
+        rscdf = fufiled_orders[['order_id', 'product_id', 'product_quantity', 'resource_id', 'resource_quantity', 'resource_cost']].copy()
+
+        rscdf['r_cost'] = rscdf.apply(
+                lambda row: (np.round(np.array(row['product_quantity']) * np.array(row['resource_quantity']) * np.array(row['resource_cost']), 2)).tolist(), 
+                axis=1
+            ) #calc resource cost
+
+        exploded_df = rscdf[['product_id', 'resource_id', 'r_cost']].explode(['resource_id', 'r_cost']) #explode lists stored in r, c
+
+        res_profit = exploded_df.groupby('resource_id').agg(
+                resource_profit=('r_cost', 'sum')
+            ).reset_index() #get total resource profits
+
+        res_profit = pd.merge(res_profit,
+                realmc.mm_dfs['mm_resource_master'],
+                how='left',
+                on='resource_id'
+            ).groupby('location_coord').agg(
+                profit=('resource_profit', 'sum')
+            ).reset_index() 
+
+        res_profit_index = res_profit.set_index('location_coord')['profit'] #reset index
+
+        aligned_res_profits = realmc.mm_dfs['mm_location_master'].join(
+                res_profit_index,
+                on='location_coord',
+                how='left'
+            ).fillna(0)['profit'] #join dfs for adding profits
+
+        realmc.mm_dfs['mm_location_master'].loc[:, 'balance'] = (
+                realmc.mm_dfs['mm_location_master']['balance'].fillna(0.0).add(aligned_res_profits)
+            ) #add profits to mm_location_master
+
+        ### update books
+        mm_books = realmc.mm_dfs['mm_books'] #temp storage 
+        temp_df = mm_books[mm_books['period_s'] == latest_period].copy() #create temp view to update latest entries
+
+        temp_df = pd.merge(
+            left=temp_df,
+            right=res_profit,
+            on='location_coord',
+            how='left')
+
+        mm_books.loc[q1, 'period_income'] = (
+                mm_books.loc[q1, 'period_income'].fillna(0.0).values + temp_df['profit'].fillna(0.0).values
+        ) #update income
+
+        realmc.mm_dfs['mm_books'] = mm_books # save changes
 
     fufiled_orders = manufacture(realmc, ccpdf)
     update_books(realmc, fufiled_orders)
@@ -131,11 +283,32 @@ def mm_tax(realmc, ccpdf: pd.DataFrame):
         #subtract from period income
         realmc.mm_dfs['mm_books'].loc[q1_1, 'period_income'] -= cit
 
-        #subtract sales tax from balances (only use if sales tax is collected and NOT bucketed into mm_books and not added to balance)
-        """q1 = realmc.mm_dfs['mm_location_master']['location_coord'].isin(salestax['location_coord']) #WRONG
+        #Add new entries and update balance_e if latest period_e == E.month
+        ## balance_e = balance_s + period_income
+        mm_books = realmc.mm_dfs['mm_books'] #temp storage 
+        latest_period = mm_books['period_s'].max() #store latest starting period
+        temp_df = mm_books[mm_books['period_s'] == latest_period].copy() #create temp view to update latest entries
 
-        merged_df = pd.merge(realmc.mm_dfs['mm_location_master'], salestax, how='left', on='location_coord')
-        realmc.mm_dfs['mm_location_master'].loc[q1,'balance'] = merged_df['balance'] - merged_df['sales_tax'].fillna(0)"""
+        q1 = (mm_books['period_s'] == latest_period) #temp query to update latest acct period
+
+        mm_books.loc[q1, 'balance_e'] = (
+                temp_df['balance_s'].fillna(0) + temp_df['period_income'].fillna(0)
+            ) #update balance_e
+
+        realmc.mm_dfs['mm_books'] = mm_books #save changes
+
+        ## populate a new set of location coords
+        balance_e = mm_books['balance_e']
+
+        loc_coord = mm_books['location_coord'].unique()
+        new_books = pd.DataFrame({'location_coord': loc_coord})
+        new_books['period_s'] = realmc.month + 1
+        new_books['period_e'] = new_books['period_s'] + 2
+        new_books['balance_s'] = balance_e
+        new_books['balance_e'] = 0.0 #will be calculated later
+        new_books['period_income'] = 0.0
+        new_books['sales_tax'] = 0.0
+        realmc.mm_dfs['mm_books'] = pd.concat([realmc.mm_dfs['mm_books'], new_books], ignore_index=True)
 
         #pay out CIT and salestax
         #return(cit, salestax)
@@ -220,12 +393,21 @@ def mm_hr(realmc, chunk_size: int = 64):
         This function pays the employees a wage of 40,000 / 12 * (1 + np.random.rand(len(realmc.mm_dfs['mm_employee_master']['pids']))/10) 
         """
         temp_employees = realmc.mm_dfs['mm_employee_master'].copy()
-        pay = (1 + np.random.rand(len(temp_employees))/10) * 40000/12 # add some randomness to the data
-        temp_employees['pay'] = pay #store amount paid
+        temp_employees['pay'] = (1 + np.random.rand(len(temp_employees))/10) * realmc.mm_params['employee_pay']/12
 
         #pay employees
-        q1 = realmc.persondf['pid'].isin(temp_employees['pid'].tolist())
-        realmc.persondf.loc[q1, 'savings'] += pay #add pay to savings
+        q1 = realmc.persondf['pid'].isin(temp_employees['pid'])
+        #add pay to savings
+        aligned_pay = realmc.persondf.merge(
+                temp_employees[['pid', 'pay']],
+                on='pid',
+                how='left'
+            )['pay'].fillna(0.0)
+        
+        realmc.persondf.loc[:, 'savings'] = (
+                realmc.persondf['savings'].fillna(0) + aligned_pay
+            )
+
 
         #need to reflect expenses in location_master and books!
         temp_employees_groupby = temp_employees.groupby(['location_coord'])['pay'].sum().reset_index()
@@ -243,7 +425,11 @@ def mm_hr(realmc, chunk_size: int = 64):
                               temp_employees_groupby, 
                               how='left', 
                               on='location_coord')
-        realmc.mm_dfs['mm_books']['period_income'] -= merge_temp['pay'].fillna(0)
+        #recognize expense in mm_books.period_income
+        realmc.mm_dfs['mm_books'].loc[q1, 'period_income'] = (
+                realmc.mm_dfs['mm_books'].loc[q1, 'period_income'].fillna(0).values - 
+                merge_temp['pay'].fillna(0).values
+            )
 
     radius = np.sqrt(2*(chunk_size/2)**2) #radius that employees must be within to stay employed
     replace = check_employees(realmc, radius)
