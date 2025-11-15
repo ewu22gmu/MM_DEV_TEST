@@ -280,7 +280,6 @@ def mm_tax(realmc, ccpdf: pd.DataFrame):
         q1_1 = realmc.mm_dfs['mm_books']['period_s'] == max(realmc.mm_dfs['mm_books']['period_s']) #get latest bank record
         incm = realmc.mm_dfs['mm_books'].loc[q1_1]['period_income'].fillna(0.0).values
         cit = np.maximum(0.0, incm * realmc.mm_params['cit_rate'])
-        print(cit)
 
         #subtract calculated cit tax
         #subtract from current balance
