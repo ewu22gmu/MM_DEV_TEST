@@ -151,9 +151,11 @@ def mm_operations(realmc, ccpdf: pd.DataFrame) -> pd.DataFrame:
                 how='left'
             ).fillna(0.0)['profit'] #join dfs for adding profits
 
-        realmc.mm_dfs['mm_location_master'].loc[:, 'balance'] = (
-                realmc.mm_dfs['mm_location_master']['balance'].fillna(0.0).add(aligned_profits)
-            ) #add profits to mm_location_master
+        """realmc.mm_dfs['mm_location_master'].loc[:, 'balance'] = (
+                realmc.mm_dfs['mm_location_master']['balance'] + aligned_profits
+            )"""
+        
+        realmc.mm_dfs['mm_location_master']['balance'] += aligned_profits
         
         #update books
         mm_books = realmc.mm_dfs['mm_books'] #temp storage 
@@ -214,11 +216,13 @@ def mm_operations(realmc, ccpdf: pd.DataFrame) -> pd.DataFrame:
                 res_profit_index,
                 on='location_coord',
                 how='left'
-            ).fillna(0)['profit'] #join dfs for adding profits
+            ).fillna(0.0)['profit'] #join dfs for adding profits
 
-        realmc.mm_dfs['mm_location_master'].loc[:, 'balance'] = (
-                realmc.mm_dfs['mm_location_master']['balance'].fillna(0.0).add(aligned_res_profits)
-            ) #add profits to mm_location_master
+        """realmc.mm_dfs['mm_location_master'].loc[:, 'balance'] = (
+                realmc.mm_dfs['mm_location_master']['balance'] + aligned_res_profits
+            ) #add profits to mm_location_master"""
+        
+        realmc.mm_dfs['mm_location_master']['balance'] += aligned_res_profits
 
         ### update books
         mm_books = realmc.mm_dfs['mm_books'] #temp storage 
@@ -250,8 +254,8 @@ def mm_tax(realmc, ccpdf: pd.DataFrame):
             if realmc.month % 3 == 0, then return true, else false
         """
 
-        if realmc.mm_params['begin_month']+2 == realmc.month:
-            realmc.mm_params['begin_month'] = realmc.month+1 #Store begining of next acct quarter
+        if realmc.mm_params['begin_month']+3 == realmc.month:
+            realmc.mm_params['begin_month'] = realmc.month #Store begining of next acct quarter
             return True
         
     def pay_tax(realmc, ccpdf: pd.DataFrame):
@@ -269,13 +273,14 @@ def mm_tax(realmc, ccpdf: pd.DataFrame):
         ccpdf_period = ccpdf.loc[q1&q2] 
 
         #sales tax
-        temp_salestax = pd.merge(realmc.mm_dfs['mm_product_master'][['product_id', 'location_coord']],ccpdf_period, how='right', on='product_id')
-        salestax = temp_salestax.groupby('location_coord')['sales_tax'].sum().reset_index()   
+        #temp_salestax = pd.merge(realmc.mm_dfs['mm_product_master'][['product_id', 'location_coord']],ccpdf_period, how='right', on='product_id')
+        #salestax = temp_salestax.groupby('location_coord')['sales_tax'].sum().reset_index()   
 
         #CIT  
         q1_1 = realmc.mm_dfs['mm_books']['period_s'] == max(realmc.mm_dfs['mm_books']['period_s']) #get latest bank record
-        incm = realmc.mm_dfs['mm_books'].loc[q1_1]['period_income']
-        cit = np.maximum(0, incm * realmc.mm_params['cit_rate'])
+        incm = realmc.mm_dfs['mm_books'].loc[q1_1]['period_income'].fillna(0.0).values
+        cit = np.maximum(0.0, incm * realmc.mm_params['cit_rate'])
+        print(cit)
 
         #subtract calculated cit tax
         #subtract from current balance
@@ -298,16 +303,15 @@ def mm_tax(realmc, ccpdf: pd.DataFrame):
         realmc.mm_dfs['mm_books'] = mm_books #save changes
 
         ## populate a new set of location coords
-        balance_e = mm_books['balance_e']
-
         loc_coord = mm_books['location_coord'].unique()
         new_books = pd.DataFrame({'location_coord': loc_coord})
         new_books['period_s'] = realmc.month + 1
         new_books['period_e'] = new_books['period_s'] + 2
-        new_books['balance_s'] = balance_e
+        new_books['balance_s'] = realmc.mm_dfs['mm_books'].loc[q1, 'balance_e'].values
         new_books['balance_e'] = 0.0 #will be calculated later
         new_books['period_income'] = 0.0
         new_books['sales_tax'] = 0.0
+
         realmc.mm_dfs['mm_books'] = pd.concat([realmc.mm_dfs['mm_books'], new_books], ignore_index=True)
 
         #pay out CIT and salestax
@@ -445,6 +449,7 @@ def postopsMM(realmc, ccpdf: pd.DataFrame):
         mm_hr(realmc)
         if check_solvency(realmc):
             mm_tax(realmc, ccpdf)
+    #print(realmc.mm_dfs['mm_location_master'])
 
 #test
 if __name__ == '__main__':
