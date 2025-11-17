@@ -1,7 +1,7 @@
 """
 Author: Eric Wu
-Date: 10.31.2025
-Version: b.1
+Date: 11.17.2025
+Version: b.3
 
 This version of operations.py is designed to run in python 3.12.x 
 
